@@ -1,11 +1,8 @@
-## My Project
+##  AWS SimSpace Weaver Sample projects
 
-TODO: Fill this README out!
+This repository is a collection of sample projects for AWS SimSpace Weaver
 
-Be sure to:
-
-* Change the title in this README
-* Edit your repository description on GitHub
+See the files in each project folder for details
 
 ## Security
 
