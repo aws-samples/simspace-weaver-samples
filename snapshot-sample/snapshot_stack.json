@@ -1,0 +1,248 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Parameters": {
+        "BucketName": {
+            "Type": "String",
+            "Description": "Enter the bucket name where the lambda is stored and snapshots will be saved"
+        },
+        "LambdaZipFilePath": {
+            "Type": "String",
+            "Default": "sim_controller.zip",
+            "Description": "Enter the lambda function zip path (ex. path/to/sim_controller.zip)"
+        },
+        "SimulationJobName": {
+            "Type": "String",
+            "Default": "SampleSimulation",
+            "Description": "Enter a unique name for the simulation job"
+        },
+        "SchemaBucketName": {
+            "Type": "String",
+            "Default": "aws-simspace-weaver-sdk-us-west-2-prod",
+            "Description": "Enter the S3 bucket name for the schema"
+        },
+        "SchemaFilePath": {
+            "Type": "String",
+            "Default": "latest/OneClickSim/one-click-sim-pathfindingsample-schema.yaml",
+            "Description": "Enter the path to the schema file"
+        }
+    },
+    "Resources": {
+        "SnapshotLambdaRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": "SnapshotLambdaRole",
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "lambda.amazonaws.com"
+                            },
+                            "Action": "sts:AssumeRole"
+                        }
+                    ]
+                },
+                "Path": "/",
+                "Policies": [
+                    {
+                        "PolicyName": "SnapshotLambdaRolePolicy",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "simspaceweaver:DescribeSimulation",
+                                        "simspaceweaver:StartClock",
+                                        "simspaceweaver:DescribeApp",
+                                        "simspaceweaver:StartApp",
+                                        "simspaceweaver:CreateSnapshot",
+                                        "logs:CreateLogGroup",
+                                        "logs:CreateLogStream",
+                                        "logs:PutLogEvents"
+                                    ],
+                                    "Resource": "*"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "SSWeaverServiceRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": "SimSpaceWeaverServiceRole",
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "simspaceweaver.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Path": "/",
+                "Policies": [
+                    {
+                        "PolicyName": "SimSpaceWeaverServiceRolePolicy",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "logs:PutLogEvents",
+                                        "logs:DescribeLogGroups",
+                                        "logs:DescribeLogStreams",
+                                        "logs:CreateLogGroup",
+                                        "logs:CreateLogStream"
+                                    ],
+                                    "Resource": "*"
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "cloudwatch:PutMetricData"
+                                    ],
+                                    "Resource": "*"
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "s3:ListBucket",
+                                        "s3:PutObject",
+                                        "s3:GetObject"
+                                    ],
+                                    "Resource": "*"
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "SnapshotLambda": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "FunctionName": "SnapshotLambda",
+                "Timeout": 900,
+                "ReservedConcurrentExecutions": 1,
+                "Role": {
+                    "Fn::GetAtt": [
+                        "SnapshotLambdaRole",
+                        "Arn"
+                    ]
+                },
+                "Code": {
+                    "S3Bucket": {
+                        "Ref": "BucketName"
+                    },
+                    "S3Key": {
+                        "Ref": "LambdaZipFilePath"
+                    }
+                },
+                "Runtime": "python3.7",
+                "Handler": "sim_controller.lambda_handler",
+                "Environment": {
+                    "Variables": {
+                        "SNAPSHOTBUCKET": {
+                            "Ref": "BucketName"
+                        }
+                    }
+                }
+            }
+        },
+        "StartSimulationEventRule": {
+            "Type": "AWS::Events::Rule",
+            "DependsOn": "SnapshotLambda",
+            "Properties": {
+                "Name": "StartSimulationEventRule",
+                "Description": "Creates event when SS Weaver StartSimulation API is called",
+                "EventBusName": "default",
+                "EventPattern": {
+                    "detail-type": [
+                        "AWS API Call via CloudTrail"
+                    ],
+                    "detail": {
+                        "eventSource": [
+                            "simspaceweaver.amazonaws.com"
+                        ],
+                        "eventName": [
+                            "StartSimulation"
+                        ],
+                        "requestParameters": {
+                            "Name": [
+                                {
+                                    "Ref": "SimulationJobName"
+                                }
+                            ]
+                        }
+                    }
+                },
+                "Targets": [
+                    {
+                        "Id": "SnapshotLambda",
+                        "Arn": {
+                            "Fn::GetAtt": [
+                                "SnapshotLambda",
+                                "Arn"
+                            ]
+                        }
+                    }
+                ],
+                "State": "ENABLED"
+            }
+        },
+        "SnapShotLambdaPermission": {
+            "Type": "AWS::Lambda::Permission",
+            "Properties": {
+                "Action": "lambda:InvokeFunction",
+                "FunctionName": {
+                    "Fn::GetAtt": [
+                        "SnapshotLambda",
+                        "Arn"
+                    ]
+                },
+                "Principal": "events.amazonaws.com",
+                "SourceArn": {
+                    "Fn::GetAtt": [
+                        "StartSimulationEventRule",
+                        "Arn"
+                    ]
+                }
+            }
+        },
+        "SimulationJob": {
+            "Type": "AWS::SimSpaceWeaver::Simulation",
+            "DependsOn": "StartSimulationEventRule",
+            "Properties": {
+                "Name": {
+                    "Ref": "SimulationJobName"
+                },
+                "RoleArn": {
+                    "Fn::GetAtt": [
+                        "SSWeaverServiceRole",
+                        "Arn"
+                    ]
+                },
+                "SchemaS3Location": {
+                    "BucketName": {
+                        "Ref": "SchemaBucketName"
+                    },
+                    "ObjectKey": {
+                        "Ref": "SchemaFilePath"
+                    }
+                }
+            }
+        }
+    }
+}
