@@ -27,6 +27,53 @@
         }
     },
     "Resources": {
+        "SnapshotMachineRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": "SnapshotMachineRole",
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "states.amazonaws.com"
+                            },
+                            "Action": "sts:AssumeRole"
+                        }
+                    ]
+                },
+                "Path": "/",
+                "Policies": [
+                    {
+                        "PolicyName": "SnapshotMachineRolePolicy",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "lambda:InvokeFunction"
+                                    ],
+                                    "Resource": [
+                                        "Fn::Join" : [":", ["Fn::GetAtt": ["SnapshotLambda", "Arn"], "*"]]
+                                    ]
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "lambda:InvokeFunction"
+                                    ],
+                                    "Resource": [
+                                        "Fn::GetAtt": ["SnapshotLambda", "Arn"]
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
         "SnapshotLambdaRole": {
             "Type": "AWS::IAM::Role",
             "Properties": {
@@ -130,6 +177,44 @@
                 ]
             }
         },
+        "StartSimulationEventRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties":{
+                "RoleName": "StartSimulationEventRole",
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "events.amazonaws.com"
+                            },
+                            "Action": "sts:AssumeRole"
+                        }
+                    ]
+                },
+                "Path": "/",
+                "Policies": [
+                    {
+                        "PolicyName": "StartSimulationEventPolicy",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "states:StartExecution"
+                                    ],
+                                    "Resource": [
+                                        "Fn::GetAtt": ["SnapshotMachine", "Arn"]
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
         "SnapshotLambda": {
             "Type": "AWS::Lambda::Function",
             "Properties": {
@@ -161,64 +246,122 @@
                 }
             }
         },
+        "SnapshotMachine": {
+            "Type": "AWS::StepFunctions::StateMachine",
+            "Properties": {
+                "StateMachineName": "SnapshotMachine",
+                "Definition": {
+                  "Comment": "Take SS Weaver snapshots",
+                  "StartAt": "Initialize",
+                  "States": {
+                    "Decrement Count": {
+                      "Next": "Is count equal zero?",
+                      "Parameters": {
+                        "count.$": "States.MathAdd($.count, -1)",
+                        "simulation_name.$": "$.simulation_name"
+                      },
+                      "Type": "Pass"
+                    },
+                    "Initialize": {
+                      "Next": "Is count equal zero?",
+                      "Parameters": {
+                        "count": 3,
+                        "simulation_name.$": "$.detail.requestParameters.Name"
+                      },
+                      "Type": "Pass"
+                    },
+                    "Is count equal zero?": {
+                      "Choices": [
+                        {
+                          "Next": "Success",
+                          "NumericEquals": 0,
+                          "Variable": "$.count"
+                        }
+                      ],
+                      "Default": "Wait 60 seconds",
+                      "Type": "Choice"
+                    },
+                    "Wait 60 seconds": {
+                      "Next": "Take Snapshot",
+                      "Seconds": 60,
+                      "Type": "Wait"
+                    },
+                    "Success": {
+                      "Type": "Succeed"
+                    },
+                    "Take Snapshot": {
+                      "Next": "Was snapshot taken?",
+                      "Parameters": {
+                        "FunctionName": { "Fn::GetAtt": ["SnapshotLambda", "Arn"]},
+                        "Payload.$": "$"
+                      },
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "ResultPath": "$.lambda_output",
+                      "ResultSelector": {
+                        "snapshot_taken.$": "$.Payload.SnapshotTaken"
+                      },
+                      "Retry": [
+                        {
+                          "BackoffRate": 2,
+                          "ErrorEquals": [
+                            "Lambda.ServiceException",
+                            "Lambda.AWSLambdaException",
+                            "Lambda.SdkClientException",
+                            "Lambda.TooManyRequestsException"
+                          ],
+                          "IntervalSeconds": 2,
+                          "MaxAttempts": 6
+                        }
+                      ],
+                      "Type": "Task"
+                    },
+                    "Wait 30 seconds": {
+                      "Next": "Take Snapshot",
+                      "Seconds": 30,
+                      "Type": "Wait"
+                    },
+                    "Was snapshot taken?": {
+                      "Choices": [
+                        {
+                          "BooleanEquals": true,
+                          "Next": "Decrement Count",
+                          "Variable": "$.lambda_output.snapshot_taken"
+                        }
+                      ],
+                      "Default": "Wait 30 seconds",
+                      "Type": "Choice"
+                    }
+                  }
+                },
+                "RoleArn": {
+                    "Fn::GetAtt": ["SnapshotMachineRole", "Arn"]
+                }
+            }
+        },
         "StartSimulationEventRule": {
             "Type": "AWS::Events::Rule",
-            "DependsOn": "SnapshotLambda",
+            "DependsOn" : "SnapshotMachine",
             "Properties": {
-                "Name": "StartSimulationEventRule",
                 "Description": "Creates event when SS Weaver StartSimulation API is called",
                 "EventBusName": "default",
                 "EventPattern": {
-                    "detail-type": [
-                        "AWS API Call via CloudTrail"
-                    ],
+                    "detail-type": ["AWS API Call via CloudTrail"],
                     "detail": {
-                        "eventSource": [
-                            "simspaceweaver.amazonaws.com"
-                        ],
-                        "eventName": [
-                            "StartSimulation"
-                        ],
-                        "requestParameters": {
-                            "Name": [
-                                {
-                                    "Ref": "SimulationJobName"
-                                }
-                            ]
-                        }
+                        "eventSource": ["simspaceweaver.amazonaws.com"],
+                        "eventName": ["StartSimulation"]
                     }
                 },
-                "Targets": [
-                    {
-                        "Id": "SnapshotLambda",
-                        "Arn": {
-                            "Fn::GetAtt": [
-                                "SnapshotLambda",
-                                "Arn"
-                            ]
-                        }
+                "Name": "SnapshotMachine-StartSimulationEventRule",
+                "State": "ENABLED",
+                "Targets": [{
+                    "Id": "SnapshotMachine",
+                    "Arn": {
+                        "Fn::GetAtt": ["SnapshotMachine", "Arn"]
+                    },
+                    "RoleArn": {
+                        "Fn::GetAtt": ["StartSimulationEventRole", "Arn"]
                     }
-                ],
-                "State": "ENABLED"
-            }
-        },
-        "SnapShotLambdaPermission": {
-            "Type": "AWS::Lambda::Permission",
-            "Properties": {
-                "Action": "lambda:InvokeFunction",
-                "FunctionName": {
-                    "Fn::GetAtt": [
-                        "SnapshotLambda",
-                        "Arn"
-                    ]
-                },
-                "Principal": "events.amazonaws.com",
-                "SourceArn": {
-                    "Fn::GetAtt": [
-                        "StartSimulationEventRule",
-                        "Arn"
-                    ]
-                }
+                }]
             }
         },
         "SimulationJob": {
