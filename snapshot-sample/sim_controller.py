@@ -73,9 +73,9 @@ class SSWeaverController:
 def main(SimulationName):
     print("SimulationName:", SimulationName)
     sim_controller=SSWeaverController(SimulationName)
-    while not (sim_controller.is_sim_started()):
+    if not (sim_controller.is_sim_started()):
         print("Waiting for simulation to be STARTED...")
-        time.sleep(30)
+        return False
     print("Simulation is STARTED")
     
     try:
@@ -84,33 +84,28 @@ def main(SimulationName):
     except sim_controller.sim_client.exceptions.ConflictException:
         pass # this exception means the app is already started
     
-    while not (sim_controller.is_app_started()):
+    if not (sim_controller.is_app_started()):
         print("Waiting for app to be STARTED")
-        time.sleep(30)
+        return False
     print("App is STARTED")
         
-    while not (sim_controller.is_clock_started()):
+    if not (sim_controller.is_clock_started()):
         sim_controller.start_clock()        
         print("Waiting for clock to be STARTED")
-        time.sleep(30)
+        return False
     print("Clock is STARTED")
     
-    # Wait for one minute before taking snapshot
-    time.sleep(60)
     print("Taking snapshot")
     sim_controller.create_snapshot()
-    while not (sim_controller.is_sim_started()):
-        print("Waiting for snapshot to complete...")
-        time.sleep(30)
-    print("Snapshot is DONE")
-    
+    print("Snapshot created")
+    return True
+
 def lambda_handler(event, context):
     print("event:", event)
-    main(event['detail']['requestParameters']['Name'])
+    snapshot_taken = main(event['simulation_name'])
     return { 
-        'message' : "Lambda completed"
+        'SnapshotTaken' : snapshot_taken
     }
-    
 if __name__=='__main__':
     if len(sys.argv) > 1:
         main(sys.argv[1])
